@@ -111,9 +111,12 @@ def main():
             tokens = fetch_new_tokens()
             
             for token in tokens:
-                addr = token.get("address")
-                if addr in posted:
-                    continue
+    if not isinstance(token, dict):
+        continue  # skip broken token
+
+    addr = token.get("address")
+    if addr in posted:
+        continue
                 
                 if passes_filters(token):
                     msg = build_message(token)
@@ -137,6 +140,19 @@ def main():
         except Exception as e:
             logging.error(f"Unexpected error: {e}")
             time.sleep(60)
-
+            
 if __name__ == "__main__":
-    main()
+    import os
+    port = int(os.environ.get("PORT", 8080))
+    from flask import Flask
+    app = Flask(__name__)
+    
+    @app.route('/')
+    def home():
+        return "Zeus Gems Bot is running!"
+
+    # Start the bot in a background thread
+    import threading
+    threading.Thread(target=main).start()
+
+    app.run(host="0.0.0.0", port=port)
