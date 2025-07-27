@@ -112,6 +112,10 @@ def main():
             
             for token in tokens:
     if not isinstance(token, dict):
+        continue
+
+    addr = token.get("address")
+    if addr in posted:
         continue  # skip broken token
 
     addr = token.get("address")
