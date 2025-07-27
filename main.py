@@ -1,15 +1,16 @@
-
 import os
 import requests
 import time
 import logging
 from datetime import datetime, timezone
 from telegram import Bot
+from flask import Flask
+import threading
 
 # === CONFIG ===
-TELEGRAM_BOT_TOKEN = os.getenv("BOT_TOKEN")  # Set this in Replit Secrets
+TELEGRAM_BOT_TOKEN = os.getenv("BOT_TOKEN")
 TELEGRAM_CHANNEL = "@zeusgemscalls"
-HELIUS_API_KEY = os.getenv("HELIUS_KEY")     # Set this in Replit Secrets
+HELIUS_API_KEY = os.getenv("HELIUS_KEY")
 
 # === FILTER SETTINGS ===
 MIN_VOLUME = 200_000  # USD
@@ -96,32 +97,28 @@ def main():
     if not TELEGRAM_BOT_TOKEN:
         logging.error("BOT_TOKEN not found in environment variables")
         return
-    
+
     if not HELIUS_API_KEY:
         logging.error("HELIUS_KEY not found in environment variables")
         return
-    
+
     posted = set()
-    
+
     logging.info("Zeus Gems Bot starting...")
-    
+
     while True:
         try:
             logging.info("Checking tokens...")
             tokens = fetch_new_tokens()
-            
+
             for token in tokens:
-    if not isinstance(token, dict):
-        continue
+                if not isinstance(token, dict):
+                    continue
 
-    addr = token.get("address")
-    if addr in posted:
-        continue  # skip broken token
+                addr = token.get("address")
+                if addr in posted:
+                    continue
 
-    addr = token.get("address")
-    if addr in posted:
-        continue
-                
                 if passes_filters(token):
                     msg = build_message(token)
                     try:
@@ -135,28 +132,24 @@ def main():
                         logging.info(f"Posted: {addr}")
                     except Exception as e:
                         logging.error(f"Failed to post: {e}")
-            
-            time.sleep(60)  # Check every 60 seconds
-            
+
+            time.sleep(60)
+
         except KeyboardInterrupt:
             logging.info("Bot stopped by user")
             break
         except Exception as e:
             logging.error(f"Unexpected error: {e}")
             time.sleep(60)
-            
+
+# === RENDER FIX ===
 if __name__ == "__main__":
-    import os
     port = int(os.environ.get("PORT", 8080))
-    from flask import Flask
     app = Flask(__name__)
-    
+
     @app.route('/')
     def home():
         return "Zeus Gems Bot is running!"
 
-    # Start the bot in a background thread
-    import threading
     threading.Thread(target=main).start()
-
     app.run(host="0.0.0.0", port=port)
