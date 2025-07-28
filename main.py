@@ -1,9 +1,8 @@
 import os
-import time
 import json
-import asyncio
 import logging
 import datetime
+import asyncio
 import threading
 import requests
 from flask import Flask
@@ -12,158 +11,182 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
+CHANNEL_ID = os.getenv("CHANNEL_ID")
 HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
 
-bot = Bot(token=TELEGRAM_TOKEN)
 app = Flask(__name__)
+bot = Bot(token=TELEGRAM_TOKEN)
 
-# In-memory storage for posted tokens and tracked prices
+logging.basicConfig(level=logging.INFO)
+
+# Track tokens already posted
 posted_tokens = {}
-tracked_tokens = {}
 
-# Async token posting loop
+# Track multipliers already alerted
+alerted_multipliers = {}
+
+# Track all-time performance for weekly summary
+performance_data = {}
+
+# Get token metadata from Helius
+async def fetch_tokens():
+    url = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getAssetsByGroup",
+        "params": {
+            "groupKey": "collection",
+            "groupValue": "tokens",
+            "page": 1,
+            "limit": 30
+        }
+    }
+    headers = {"Content-Type": "application/json"}
+    try:
+        response = requests.post(url, data=json.dumps(payload), headers=headers)
+        result = response.json()
+        if "result" in result and "items" in result["result"]:
+            return result["result"]["items"]
+        else:
+            logging.error("Unexpected response from Helius: %s", response.text)
+    except Exception as e:
+        logging.error("Error fetching Helius tokens: %s", e)
+    return []
+
+# Dexscreener API
+async def get_token_data(mint):
+    try:
+        url = f"https://api.dexscreener.com/latest/dex/search/?q={mint}"
+        response = requests.get(url)
+        data = response.json()
+        if data and "pairs" in data and len(data["pairs"]) > 0:
+            return data["pairs"][0]
+    except Exception as e:
+        logging.warning("Error getting token data: %s", e)
+    return None
+
+# Async message sender
 async def post_tokens():
-    global posted_tokens
     while True:
-        try:
-            logger.info("Scanning tokens from Helius...")
-            now = datetime.datetime.utcnow()
-            start_time = (now - datetime.timedelta(minutes=60)).isoformat("T") + "Z"
+        logging.info("Scanning tokens from Helius...")
+        tokens = await fetch_tokens()
+        now = datetime.datetime.utcnow()
 
-            url = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
-            headers = {"Content-Type": "application/json"}
-            body = {
-                "jsonrpc": "2.0",
-                "id": "my-id",
-                "method": "getNewTokens",  # this method must match a real one supported by Helius
-                "params": {
-                    "startTime": start_time,
-                    "limit": 20
-                }
-            }
+        for token in tokens:
+            try:
+                mint = token["id"]
+                if mint in posted_tokens:
+                    continue
 
-            response = requests.post(url, headers=headers, json=body)
-            if response.status_code != 200:
-                logger.error(f"Unexpected response from Helius: {response.text}")
-                await asyncio.sleep(60)
-                continue
+                dexscreener_data = await get_token_data(mint)
+                if not dexscreener_data:
+                    continue
 
-            tokens = response.json().get("result", [])
-            for token in tokens:
-                try:
-                    mint = token["mint"]
-                    if mint in posted_tokens:
-                        continue
+                pair_url = dexscreener_data.get("url", "N/A")
+                price = float(dexscreener_data.get("priceUsd", 0))
+                marketcap = float(dexscreener_data.get("fdv", 0))
+                volume = float(dexscreener_data.get("volume", {}).get("h1", 0))
+                liquidity = float(dexscreener_data.get("liquidity", {}).get("usd", 0))
+                age = dexscreener_data.get("age", "N/A")
 
-                    name = token.get("name", "N/A")
-                    symbol = token.get("symbol", "N/A")
-                    mc = token.get("marketCap", "?")
-                    age = token.get("age", "?")
-                    dev = token.get("developer", "?")
-                    holders = token.get("holders", "?")
-                    top10 = token.get("top10Holders", "?")
-                    vol = token.get("volume", "?")
-                    platform = token.get("platform", "Solana")
-                    liquidity = token.get("liquidity", "?")
-                    bonding_curve = token.get("bondingCurve", "?")
-                    socials = token.get("socials", "?")
-
-                    dexscreener_link = f"https://dexscreener.com/solana/{mint}"
-
-                    message = f"""
-🔔 <b>{name} | {symbol}</b>
+                message = f"""
+🔔 <b>{dexscreener_data['baseToken']['name']} | {dexscreener_data['baseToken']['symbol']}</b>
 <code>{mint}</code>
 
-🧢 <b>Marketcap:</b> {mc}
-⏱️ <b>Age:</b> {age}
-🧑‍💻 <b>Dev:</b> {dev}
-👥 <b>Holders:</b> {holders}
-🔝 <b>Top 10 holders:</b> {top10}
-🚀 <b>Volume:</b> {vol}
-🏛️ <b>Platform:</b> {platform}
-💧 <b>Liquidity:</b> {liquidity}
-📊 <b>Bonding Curve:</b> {bonding_curve}
-🌍 <b>Socials:</b> {socials}
+🧢 Marketcap: ${marketcap:,.0f}
+⏱️ Age: {age}
+🚀 Volume: ${volume:,.0f}
+💧 Liquidity: ${liquidity:,.0f}
+📊 Chart: <a href='{pair_url}'>Dexscreener</a>
 
-📈 <a href='{dexscreener_link}'>View Dexscreener Chart</a>
+💎 Gamble Play, NFA, DYOR
 
-🤖 <b>Powered by Zeus Gems Bot</b>
+— Powered by Zeus Gems Bot
+Trojan: https://t.me/agamemnon_trojanbot?start=r-bigfave_001
+GMGNAI: https://t.me/gmgnaibot?start=i_QCOzrSSn
+Axiom: http://axiom.trade/@bigfave00
 
-🎁 Bonus: If you'd like me to add price tracking and 2x/3x/4x alerts based on live price via API, let me know and I’ll hook it up.
+<i>💬 Bonus: If you'd like me to add price tracking and 2x/3x/4x alerts based on live price via API, let me know and I’ll hook it up.</i>
+"""
+                await bot.send_message(chat_id=CHANNEL_ID, text=message, parse_mode="HTML", disable_web_page_preview=True)
 
-🔗 Trojan: https://t.me/agamemnon_trojanbot?start=r-bigfave_001
-🔗 GMGNAI: https://t.me/gmgnaibot?start=i_QCOzrSSn
-🔗 Axiom: http://axiom.trade/@bigfave00
+                posted_tokens[mint] = {
+                    "price": price,
+                    "name": dexscreener_data['baseToken']['name']
+                }
+                alerted_multipliers[mint] = set()
+                performance_data[mint] = {"name": dexscreener_data['baseToken']['name'], "price": price, "max": price}
 
-🎲 Gamble Play, NFA, DYOR
-                    """
-
-                    await bot.send_message(
-                        chat_id=TELEGRAM_CHANNEL_ID,
-                        text=message,
-                        parse_mode="HTML",
-                        disable_web_page_preview=False
-                    )
-
-                    posted_tokens[mint] = {
-                        "posted_time": datetime.datetime.utcnow().isoformat(),
-                        "start_mc": float(mc) if isinstance(mc, (int, float, str)) and str(mc).replace('.', '', 1).isdigit() else None
-                    }
-                except Exception as e:
-                    logger.error(f"Error posting token: {e}")
-
-        except Exception as e:
-            logger.error(f"Exception in post_tokens: {e}")
+            except Exception as e:
+                logging.warning("Error posting token: %s", e)
 
         await asyncio.sleep(60)
 
-# Monitor prices for 2x, 3x, 4x alerts
-async def monitor_price_changes():
+# Price tracking and alerts
+async def track_prices():
     while True:
-        try:
-            for mint, data in list(posted_tokens.items()):
-                start_mc = data.get("start_mc")
-                if not start_mc:
+        for mint, info in posted_tokens.items():
+            try:
+                data = await get_token_data(mint)
+                if not data:
                     continue
 
-                # Simulated market cap (replace with real API call later)
-                current_mc = start_mc * 2  # For testing, simulate 2x
+                current_price = float(data.get("priceUsd", 0))
+                original_price = info["price"]
+                name = info["name"]
 
-                for multiplier in [2, 3, 4]:
-                    target = start_mc * multiplier
-                    if current_mc >= target and not data.get(f"alerted_{multiplier}x"):
-                        msg = f"🔥 {multiplier}x Alert!
-<code>{mint}</code> hit {multiplier}x from launch MC!"
-                        await bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=msg)
-                        posted_tokens[mint][f"alerted_{multiplier}x"] = True
+                # Update highest
+                if mint in performance_data:
+                    performance_data[mint]["max"] = max(performance_data[mint]["max"], current_price)
 
+                # Calculate multiplier
+                if original_price <= 0:
+                    continue
+
+                ratio = current_price / original_price
+                next_x = int(ratio)
+
+                for multiplier in range(2, next_x + 1):
+                    if multiplier not in alerted_multipliers[mint]:
+                        msg = f"🔥 {multiplier}x Alert!\n💎 {name} just hit {multiplier}x from when it was posted!"
+                        await bot.send_message(chat_id=CHANNEL_ID, text=msg)
+                        alerted_multipliers[mint].add(multiplier)
+
+            except Exception as e:
+                logging.warning("Tracking error: %s", e)
+        await asyncio.sleep(60)
+
+# Weekly summary (placeholder)
+async def send_weekly_summary():
+    while True:
+        try:
+            summary = "<b>📈 Zeus Gems Weekly Summary</b>\n\n"
+            for mint, stats in performance_data.items():
+                x = stats["max"] / stats["price"] if stats["price"] > 0 else 0
+                if x >= 2:
+                    summary += f"💠 {stats['name']}: {x:.1f}x\n"
+
+            if summary.strip() != "<b>📈 Zeus Gems Weekly Summary</b>":
+                await bot.send_message(chat_id=CHANNEL_ID, text=summary, parse_mode="HTML")
         except Exception as e:
-            logger.error(f"Price monitor error: {e}")
+            logging.warning("Weekly summary error: %s", e)
+        await asyncio.sleep(604800)  # 1 week
 
-        await asyncio.sleep(300)  # Every 5 mins
-
-# Flask server for alive ping
+# Flask app for keep-alive
 @app.route("/")
-def index():
-    return "Zeus Gems bot is alive."
+def home():
+    return "<h2>Zeus Gems Bot is running! ✅</h2>"
 
-# Start all async tasks
-async def start_bot():
-    await asyncio.gather(
-        post_tokens(),
-        monitor_price_changes(),
-    )
-
-def run_bot():
+def run_async_tasks():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(start_bot())
+    loop.create_task(post_tokens())
+    loop.create_task(track_prices())
+    loop.create_task(send_weekly_summary())
+    loop.run_forever()
 
 if __name__ == "__main__":
-    threading.Thread(target=run_bot).start()
+    threading.Thread(target=run_async_tasks).start()
     app.run(host="0.0.0.0", port=10000)
