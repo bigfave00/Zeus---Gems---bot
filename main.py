@@ -1,173 +1,155 @@
+import os
 import requests
 import time
-import threading
-from datetime import datetime, timedelta
-from flask import Flask
-import os
 import logging
+from flask import Flask
+from threading import Thread
+from datetime import datetime, timedelta
+from telegram import Bot
 
-# === CONFIGURATION ===
-HELIUS_API_KEY = "your-helius-api-key"
-TELEGRAM_BOT_TOKEN = "your-telegram-bot-token"
-TELEGRAM_CHANNEL_ID = "@yourchannelusername"
-
-MIN_VOLUME = 50000
-MAX_VOLUME = 200000
-POSTED_TOKENS = {}
-PERFORMANCE_LOG = {}
-
-# === LOGGER ===
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger()
 
-# === FLASK SERVER FOR UPTIMEROBOT ===
 app = Flask(__name__)
+
+TELEGRAM_BOT_TOKEN = os.getenv("BOT_TOKEN")
+TELEGRAM_CHANNEL_ID = os.getenv("CHANNEL_ID")
+HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
+
+bot = Bot(token=TELEGRAM_BOT_TOKEN)
+posted_tokens = {}
+performance_log = {}
+
+def format_token_message(token, mc, age_min, liquidity, volume):
+    dex_url = f"https://dexscreener.com/solana/{token['mint']}"
+    return f"""
+🔔 {token['name']} | {token['symbol']}
+{token['mint']}
+
+🧢 Marketcap: ${mc:,.0f}
+⏱️ Age: {age_min}m
+
+🧑‍💻 Dev: {token.get('owner', 'N/A')[:5]}...{token.get('owner', 'N/A')[-5:]} (💰 0%)
+👥 Holders: {token.get('holders', 0)}
+🔝 Top 10 holders: {token.get('top10', 0)}%
+🚀 Volume: ${volume:,.0f}
+
+🏛️ Platform: {token.get('platform', 'Unknown')}
+💧 Liquidity: ${liquidity:,.0f}
+📊 Bonding Curve: {token.get('curve', 0)}%
+
+🌍 Socials ↴
+🐦 X profile
+📝 X post
+🔍 X community
+
+📈 [View on Dexscreener]({dex_url})
+
+🔗 Referrals:
+• [Trojan Sniper](https://t.me/agamemnon_trojanbot?start=r-bigfave_001)
+• [GMGNAI Intel](https://t.me/gmgnaibot?start=i_QCOzrSSn)
+• [Axiom DEX](http://axiom.trade/@bigfave00)
+
+Gamble Play, NFA, DYOR
+"""
+
+def fetch_new_tokens():
+    url = f"https://api.helius.xyz/v0/token-metadata?api-key={HELIUS_API_KEY}"
+    now = datetime.utcnow()
+    cutoff_time = now - timedelta(minutes=60)
+    
+    # Dummy mint list for demo (replace with real discovered mints)
+    mint_list = ["So11111111111111111111111111111111111111112"]  # Add real tokens here
+
+    headers = {"accept": "application/json", "content-type": "application/json"}
+    body = {"mintAccounts": mint_list}
+    try:
+        response = requests.post(url, headers=headers, json=body)
+        data = response.json()
+        return data
+    except Exception as e:
+        logging.error(f"Error fetching Helius tokens: {e}")
+        return []
+
+def post_tokens():
+    while True:
+        logging.info("Scanning tokens from Helius...")
+        tokens = fetch_new_tokens()
+        for token in tokens:
+            mint = token["mint"]
+            if mint in posted_tokens:
+                continue
+
+            mc = token.get("marketCap", 30000)
+            volume = token.get("volume", 60000)
+            liquidity = token.get("liquidity", 20000)
+            created_at = datetime.utcnow() - timedelta(minutes=token.get("age", 2))
+            age_min = int((datetime.utcnow() - created_at).total_seconds() / 60)
+
+            if 50000 <= volume <= 200000 and liquidity > 10000 and mc > 30000:
+                message = format_token_message(token, mc, age_min, liquidity, volume)
+                bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=message, parse_mode="Markdown", disable_web_page_preview=False)
+
+                posted_tokens[mint] = {
+                    "initial_mc": mc,
+                    "current_mc": mc,
+                    "last_update": time.time()
+                }
+                performance_log[mint] = {"name": token["name"], "mc": mc}
+
+        check_performance_updates()
+        time.sleep(300)
+
+def check_performance_updates():
+    for mint, info in posted_tokens.items():
+        try:
+            url = f"https://api.helius.xyz/v0/token-metadata?api-key={HELIUS_API_KEY}"
+            headers = {"accept": "application/json", "content-type": "application/json"}
+            body = {"mintAccounts": [mint]}
+            response = requests.post(url, headers=headers, json=body)
+            data = response.json()
+
+            if data and isinstance(data, list):
+                current_mc = data[0].get("marketCap", 0)
+                multiplier = current_mc / info["initial_mc"]
+
+                alert_msg = None
+                if multiplier >= 4 and info.get("last_alert") != "4x":
+                    alert_msg = f"🚨 {data[0]['name']} just hit **4x** from its original MC!"
+                    posted_tokens[mint]["last_alert"] = "4x"
+                elif multiplier >= 3 and info.get("last_alert") != "3x":
+                    alert_msg = f"🚨 {data[0]['name']} just hit **3x**!"
+                    posted_tokens[mint]["last_alert"] = "3x"
+                elif multiplier >= 2 and info.get("last_alert") != "2x":
+                    alert_msg = f"🚨 {data[0]['name']} just hit **2x**!"
+                    posted_tokens[mint]["last_alert"] = "2x"
+
+                if alert_msg:
+                    bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=alert_msg)
+        except Exception as e:
+            logging.error(f"Performance check failed for {mint}: {e}")
+
+def send_weekly_summary():
+    while True:
+        now = datetime.utcnow()
+        if now.weekday() == 6 and now.hour == 18:
+            summary = "📊 Weekly Token Summary:\n\n"
+            sorted_perf = sorted(performance_log.items(), key=lambda x: x[1]["mc"], reverse=True)
+            top = sorted_perf[:5]
+            for mint, data in top:
+                summary += f"- {data['name']}: ${data['mc']:,.0f} MC\n"
+            bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=summary)
+            time.sleep(86400)
+        else:
+            time.sleep(3600)
 
 @app.route('/')
 def home():
-    return "Zeus Gems Bot is alive! 🔥"
+    return "Zeus Gems Bot is live!"
 
-# === SEND TELEGRAM MESSAGE ===
-def send_telegram_message(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHANNEL_ID,
-        "text": message,
-        "parse_mode": "Markdown"
-    }
-    res = requests.post(url, json=payload)
-    return res.status_code == 200
-
-# === FETCH NEW TOKENS FROM HELIUS ===
-def fetch_tokens():
-    logger.info("Scanning tokens from Helius...")
-    url = f"https://api.helius.xyz/v0/tokens/metadata?api-key={HELIUS_API_KEY}"
-    headers = {"accept": "application/json"}
-    try:
-        res = requests.get(url, headers=headers)
-        data = res.json()
-
-        if not isinstance(data, list):
-            logger.error("Unexpected response from Helius.")
-            return []
-
-        return data
-    except Exception as e:
-        logger.error(f"Error fetching Helius tokens: {e}")
-        return []
-
-# === FORMAT TELEGRAM MESSAGE ===
-def format_message(token):
-    name = token.get("name", "Unknown")
-    symbol = token.get("symbol", "???")
-    address = token.get("token_address", "N/A")
-    mc = token.get("market_cap", 0)
-    volume = token.get("volume_24h", 0)
-    liquidity = token.get("liquidity", 0)
-    age = token.get("age_minutes", 0)
-    holders = token.get("holders", "N/A")
-    dev = token.get("creator", "N/A")
-    top_holders = token.get("top10_holders_pct", "N/A")
-    bonding = token.get("bonding_curve", "N/A")
-
-    # Dexscreener link
-    dexscreener_link = f"https://dexscreener.com/solana/{address}"
-
-    # Referral links
-    trojan = "https://t.me/agamemnon_trojanbot?start=r-bigfave_001"
-    gmgnai = "https://t.me/gmgnaibot?start=i_QCOzrSSn"
-    axiom = "http://axiom.trade/@bigfave00"
-
-    msg = (
-        f"🔔 *{name}* | {symbol}\n"
-        f"`{address}`\n\n"
-        f"🧢 Marketcap: ${int(mc):,}\n"
-        f"⏱️ Age: {int(age)}m\n\n"
-        f"🧑‍💻 Dev: {dev} (💰 0%)\n"
-        f"👥 Holders: {holders}\n"
-        f"🔝 Top 10 holders: {top_holders}%\n"
-        f"🚀 Volume: ${int(volume):,}\n\n"
-        f"🏛️ Platform: Launchlab\n"
-        f"💧 Liquidity: ${int(liquidity):,}\n"
-        f"📊 Bonding Curve: {bonding}%\n\n"
-        f"📈 [View on Dexscreener]({dexscreener_link})\n\n"
-        f"🎯 [Trojan Bot]({trojan}) | [GMGNAI]({gmgnai}) | [Axiom]({axiom})\n\n"
-        f"_Gamble Play, NFA, DYOR_"
-    )
-    return msg
-
-# === TRACK 2x/3x/4x TOKENS ===
-def check_performance():
-    for addr, info in POSTED_TOKENS.items():
-        try:
-            url = f"https://api.dexscreener.com/latest/dex/pairs/solana/{addr}"
-            res = requests.get(url)
-            data = res.json()
-            price = data.get("pair", {}).get("priceUsd", 0)
-            if not price: continue
-            price = float(price)
-            original_price = info["price"]
-
-            x_gain = round(price / original_price)
-            if x_gain >= 2 and x_gain <= 4 and x_gain not in info["alerts"]:
-                msg = f"🔥 ${info['symbol']} just hit *{x_gain}x* from original call!\n[View Chart](https://dexscreener.com/solana/{addr})"
-                send_telegram_message(msg)
-                info["alerts"].append(x_gain)
-        except Exception as e:
-            logger.error(f"Error checking performance for {addr}: {e}")
-
-# === WEEKLY SUMMARY ===
-def send_weekly_summary():
-    if not PERFORMANCE_LOG:
-        send_telegram_message("📊 No top tokens to summarize this week.")
-        return
-
-    summary = "*📈 Weekly Zeus Gems Summary:*\n"
-    sorted_tokens = sorted(PERFORMANCE_LOG.items(), key=lambda x: x[1]["x"], reverse=True)
-    for addr, info in sorted_tokens[:5]:
-        summary += f"• {info['name']} | {info['symbol']} → {info['x']}x\n"
-
-    send_telegram_message(summary)
-
-# === MAIN SCANNER LOOP ===
-def scanner_loop():
-    while True:
-        tokens = fetch_tokens()
-        for token in tokens:
-            address = token.get("token_address")
-            volume = token.get("volume_24h", 0)
-            age = token.get("age_minutes", 999)
-            if not address or address in POSTED_TOKENS: continue
-            if MIN_VOLUME <= volume <= MAX_VOLUME and age <= 60:
-                message = format_message(token)
-                sent = send_telegram_message(message)
-                if sent:
-                    POSTED_TOKENS[address] = {
-                        "price": float(token.get("price_usd", 0.0001)),
-                        "symbol": token.get("symbol", "???"),
-                        "alerts": []
-                    }
-                    PERFORMANCE_LOG[address] = {
-                        "name": token.get("name", ""),
-                        "symbol": token.get("symbol", ""),
-                        "x": 1
-                    }
-                    logger.info(f"Posted: {token.get('symbol')}")
-
-        check_performance()
-
-        # Weekly summary every Sunday 6pm UTC
-        now = datetime.utcnow()
-        if now.weekday() == 6 and now.hour == 18 and now.minute < 5:
-            send_weekly_summary()
-
-        time.sleep(120)
-
-# === START BOT ===
-def main():
-    threading.Thread(target=scanner_loop).start()
+def run_flask():
+    app.run(host="0.0.0.0", port=10000)
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    main()
-    app.run(host="0.0.0.0", port=port)
+    Thread(target=run_flask).start()
+    Thread(target=post_tokens).start()
+    Thread(target=send_weekly_summary).start()
