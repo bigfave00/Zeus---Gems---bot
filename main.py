@@ -1,147 +1,140 @@
 import os
-import requests
 import time
 import threading
-import logging
 import datetime
+import requests
+import logging
 from flask import Flask
 from telegram import Bot
+from telegram.constants import ParseMode
+import asyncio
 
-# Setup
+# Logging setup
 logging.basicConfig(level=logging.INFO)
-app = Flask(__name__)
+logger = logging.getLogger(__name__)
 
-# Environment Variables
-TELEGRAM_BOT_TOKEN = os.environ.get("BOT_TOKEN")
-TELEGRAM_CHANNEL_ID = os.environ.get("CHANNEL_ID")
-HELIUS_API_KEY = os.environ.get("HELIUS_API_KEY")
+# ENV variables
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
+HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
+app = Flask(__name__)
+
+# Track posted tokens
 posted_tokens = {}
-performance_data = {}
 
-# Simulated tokens for testing (replace this with real API logic)
-def get_token_info():
-    tokens = [
-        {
-            "mint": f"TestMint{i}",
-            "name": f"Token{i}",
-            "symbol": f"TKN{i}",
-            "market_cap": 100_000 + i * 50000,
-            "volume": 60000 + i * 10000,
-            "liquidity": 20000 + i * 5000,
-            "age_minutes": i * 15,
-            "holders": 150 + i * 10,
-            "top10": "90%",
-            "bonding_curve": "Linear",
-            "platform": "Solana"
-        } for i in range(1, 4)
-    ]
-    return tokens
+# Async helper
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
 
-def format_message(token):
-    mint = token["mint"]
-    name = token["name"]
-    symbol = token["symbol"]
-    market_cap = token["market_cap"]
-    volume = token["volume"]
-    liquidity = token["liquidity"]
-    age = token["age_minutes"]
-    holders = token["holders"]
-    top10 = token["top10"]
-    bonding_curve = token["bonding_curve"]
-    platform = token["platform"]
+def fetch_tokens():
+    url = f"https://api.helius.xyz/v1/mintlist?api-key={HELIUS_API_KEY}"
+    payload = {
+        "query": {
+            "types": ["token"],
+            "conditions": [
+                {"field": "created_at", "operator": ">", "value": int(time.time()) - 3600},
+            ]
+        },
+        "limit": 10
+    }
+    try:
+        res = requests.post(url, json=payload)
+        if res.status_code == 200:
+            return res.json()
+        else:
+            logger.error(f"Unexpected response from Helius: {res.text}")
+            return []
+    except Exception as e:
+        logger.error(f"Error fetching tokens: {e}")
+        return []
+
+def create_token_message(token):
+    mint = token.get("mint")
+    name = token.get("name", "Unknown")
+    symbol = token.get("symbol", "N/A")
+    marketcap = token.get("marketcap", "N/A")
+    age = token.get("age", "N/A")
+    dev = token.get("dev", "N/A")
+    holders = token.get("holders", "N/A")
+    top_holders = token.get("top_holders", "N/A")
+    volume = token.get("volume", "N/A")
+    platform = token.get("platform", "Solana")
+    liquidity = token.get("liquidity", "N/A")
+    bonding = token.get("bonding_curve", "N/A")
+    socials = token.get("socials", "N/A")
+
     dexscreener_link = f"https://dexscreener.com/solana/{mint}"
 
-    message = f"""
-🔔 <b>{name} | {symbol}</b>
+    return f"""
+🔔 <b>{name}</b> | <b>{symbol}</b>
 <code>{mint}</code>
-🧢 Marketcap: ${market_cap:,}
-⏱️ Age: {age} minutes
-🧑‍💻 Dev: Unknown
-👥 Holders: {holders}
-🔝 Top 10 holders: {top10}
-🚀 Volume: ${volume:,}
-🏛️ Platform: {platform}
-💧 Liquidity: ${liquidity:,}
-📊 Bonding Curve: {bonding_curve}
-📈 Chart: <a href="{dexscreener_link}">Dexscreener</a>
 
-👑 Trojan: <a href="https://t.me/agamemnon_trojanbot?start=r-bigfave_001">Click Here</a>
-🤖 GMGNAI: <a href="https://t.me/gmgnaibot?start=i_QCOzrSSn">Click Here</a>
-📉 Axiom: <a href="http://axiom.trade/@bigfave00">Click Here</a>
+🧢 <b>Marketcap:</b> {marketcap}
+⏱️ <b>Age:</b> {age}
+🧑‍💻 <b>Dev:</b> {dev}
+👥 <b>Holders:</b> {holders}
+🔝 <b>Top 10 holders:</b> {top_holders}
+🚀 <b>Volume:</b> {volume}
+🏛️ <b>Platform:</b> {platform}
+💧 <b>Liquidity:</b> {liquidity}
+📊 <b>Bonding Curve:</b> {bonding}
+🌍 <b>Socials:</b> {socials}
+📈 <a href='{dexscreener_link}'>Dexscreener Chart</a>
 
-⚠️ Gamble Play, NFA, DYOR.
+<b>Play carefully, NFA, DYOR</b> 🧠
 
-💎 <i>Zeus Gems Bot</i>
-🧠 <b>If you'd like me to add price tracking and 2x/3x/4x alerts based on live price via API, let me know and I’ll hook it up.</b>
+🔥 Trojan Sniper: https://t.me/agamemnon_trojanbot?start=r-bigfave_001
+🚀 GMGNAI Sniper: https://t.me/gmgnaibot?start=i_QCOzrSSn
+📊 Axiom Trade: http://axiom.trade/@bigfave00
+
+<b>If you'd like me to add price tracking and 2x/3x/4x alerts based on live price via API, let me know and I’ll hook it up.</b>
 """
-    return message
 
-def post_tokens():
+async def post_tokens():
     while True:
-        logging.info("Scanning tokens from Helius...")
-        tokens = get_token_info()
+        logger.info("Scanning tokens from Helius...")
+        tokens = fetch_tokens()
         now = datetime.datetime.utcnow()
 
         for token in tokens:
-            mint = token["mint"]
+            mint = token.get("mint")
+            if not mint:
+                continue
             if mint not in posted_tokens:
-                message = format_message(token)
-                try:
-                    bot.send_message(
-                        chat_id=TELEGRAM_CHANNEL_ID,
-                        text=message,
-                        parse_mode="HTML",
-                        disable_web_page_preview=True
-                    )
-                    posted_tokens[mint] = {
-                        "market_cap": token["market_cap"],
-                        "timestamp": now
-                    }
-                    performance_data[mint] = {
-                        "name": token["name"],
-                        "symbol": token["symbol"],
-                        "posted_cap": token["market_cap"],
-                        "current_cap": token["market_cap"],
-                        "times": []
-                    }
-                except Exception as e:
-                    logging.error(f"Error sending message: {e}")
+                message = create_token_message(token)
+                await bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=message, parse_mode=ParseMode.HTML, disable_web_page_preview=False)
+                posted_tokens[mint] = {
+                    "time": now,
+                    "mc": token.get("marketcap", 0),
+                    "2x": False,
+                    "3x": False,
+                    "4x": False
+                }
 
-        time.sleep(300)
+            # Simulate live MC for now
+            current_mc = posted_tokens[mint]["mc"] * 1.1
 
-def check_performance():
-    while True:
-        for mint, data in performance_data.items():
-            try:
-                for x in [2, 3, 4]:
-                    target = data["posted_cap"] * x
-                    if x not in data["times"] and data["current_cap"] >= target:
-                        alert = f"🔥 <b>{data['name']} ({data['symbol']}) just hit {x}x!</b>\n<code>{mint}</code>"
-                        bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=alert, parse_mode="HTML")
-                        data["times"].append(x)
-            except Exception as e:
-                logging.error(f"Error checking performance: {e}")
-        time.sleep(180)
+            if not posted_tokens[mint]["2x"] and current_mc >= 2 * posted_tokens[mint]["mc"]:
+                await bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=f"🔥 <b>{token.get('name')}</b> just hit <b>2x!</b>", parse_mode=ParseMode.HTML)
+                posted_tokens[mint]["2x"] = True
+            if not posted_tokens[mint]["3x"] and current_mc >= 3 * posted_tokens[mint]["mc"]:
+                await bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=f"🚀 <b>{token.get('name')}</b> just hit <b>3x!</b>", parse_mode=ParseMode.HTML)
+                posted_tokens[mint]["3x"] = True
+            if not posted_tokens[mint]["4x"] and current_mc >= 4 * posted_tokens[mint]["mc"]:
+                await bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=f"💎 <b>{token.get('name')}</b> just hit <b>4x!</b>", parse_mode=ParseMode.HTML)
+                posted_tokens[mint]["4x"] = True
 
-def send_weekly_summary():
-    while True:
-        now = datetime.datetime.utcnow()
-        if now.weekday() == 6 and now.hour == 20:  # Sunday 8PM UTC
-            summary = "📊 <b>Weekly Zeus Gems Summary</b>\n\n"
-            for mint, data in performance_data.items():
-                summary += f"🔹 {data['name']} ({data['symbol']}) — Posted: ${data['posted_cap']:,}, Now: ${data['current_cap']:,}\n"
-            bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=summary, parse_mode="HTML")
-            time.sleep(3600 * 24)
-        time.sleep(3600)
+        await asyncio.sleep(60)
+
+def run_async_loop():
+    loop.run_until_complete(post_tokens())
 
 @app.route("/")
 def home():
-    return "Zeus Gems Bot is Live!"
+    return "<h2>✅ Zeus Gems Bot is Live</h2>"
 
 if __name__ == "__main__":
-    threading.Thread(target=post_tokens).start()
-    threading.Thread(target=check_performance).start()
-    threading.Thread(target=send_weekly_summary).start()
+    threading.Thread(target=run_async_loop).start()
     app.run(host="0.0.0.0", port=10000)
