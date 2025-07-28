@@ -1,169 +1,171 @@
 import requests
 import time
 import threading
-import os
-import logging
 from datetime import datetime, timedelta
 from flask import Flask
+import os
+import logging
 
 # === CONFIGURATION ===
-TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-TELEGRAM_CHANNEL = "@YourChannelUsername"
-HELIUS_API_KEY = "YOUR_HELIUS_API_KEY"
+HELIUS_API_KEY = "your-helius-api-key"
+TELEGRAM_BOT_TOKEN = "your-telegram-bot-token"
+TELEGRAM_CHANNEL_ID = "@yourchannelusername"
+
 MIN_VOLUME = 50000
 MAX_VOLUME = 200000
 POSTED_TOKENS = {}
-TRACKED_TOKENS = {}
+PERFORMANCE_LOG = {}
 
-# === REFERRAL LINKS ===
-TROJAN_REF = "https://t.me/agamemnon_trojanbot?start=r-bigfave_001"
-GMGNAI_REF = "https://t.me/gmgnaibot?start=i_QCOzrSSn"
-AXIOM_REF = "http://axiom.trade/@bigfave00"
-
-# === LOGGING ===
+# === LOGGER ===
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger()
 
-# === TELEGRAM FUNCTION ===
-def send_telegram_message(msg):
+# === FLASK SERVER FOR UPTIMEROBOT ===
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Zeus Gems Bot is alive! 🔥"
+
+# === SEND TELEGRAM MESSAGE ===
+def send_telegram_message(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
-        "chat_id": TELEGRAM_CHANNEL,
-        "text": msg,
+        "chat_id": TELEGRAM_CHANNEL_ID,
+        "text": message,
         "parse_mode": "Markdown"
     }
     res = requests.post(url, json=payload)
     return res.status_code == 200
 
-# === TOKEN SCANNER ===
-def scan_tokens():
-    logger.info("Scanning tokens...")
-    url = f"https://api.helius.xyz/v0/tokens?api-key={HELIUS_API_KEY}"
+# === FETCH NEW TOKENS FROM HELIUS ===
+def fetch_tokens():
+    logger.info("Scanning tokens from Helius...")
+    url = f"https://api.helius.xyz/v0/tokens/metadata?api-key={HELIUS_API_KEY}"
+    headers = {"accept": "application/json"}
     try:
-        res = requests.get(url)
-        tokens = res.json()
+        res = requests.get(url, headers=headers)
+        data = res.json()
 
-        for token in tokens:
-            addr = token.get("token_address")
-            if not addr or addr in POSTED_TOKENS:
-                continue
+        if not isinstance(data, list):
+            logger.error("Unexpected response from Helius.")
+            return []
 
-            volume = token.get("volume_usd", 0)
-            liquidity = token.get("liquidity_usd", 0)
-            age_minutes = token.get("age_minutes", 999)
-
-            if not (MIN_VOLUME <= volume <= MAX_VOLUME):
-                continue
-            if age_minutes < 60:
-                continue
-
-            name = token.get("name", "Unknown")
-            symbol = token.get("symbol", "???")
-            mc = token.get("market_cap_usd", 0)
-            holders = token.get("holders", 0)
-            dev = token.get("deployer", "")[:6] + "..." + token.get("deployer", "")[-5:]
-            top_holders = token.get("top_10_holders_percent", 0)
-            bonding = token.get("bonding_curve", 0)
-            platform = token.get("platform", "Unknown")
-            birdeye_link = f"https://birdeye.so/token/{addr}?chain=solana"
-
-            message = (
-                f"🔔*{name.upper()}* | *{symbol}*\n"
-                f"{addr}\n\n"
-                f"🧢 Marketcap: ${mc:,.0f}\n"
-                f"⏱️ Age: {int(age_minutes)}m\n\n"
-                f"🧑‍💻 Dev: {dev} (💰 0%)\n"
-                f"👥 Holders: {holders}\n"
-                f"🔝 Top 10 holders: {top_holders}%\n"
-                f"🚀 Volume: ${volume:,.0f}\n\n"
-                f"🏛️ Platform: {platform}\n"
-                f"💧 Liquidity: ${liquidity:,.0f}\n"
-                f"📊 Bonding Curve: {bonding}%\n\n"
-                f"🌍 Socials ↴\n\n"
-                f"🐦 X profile\n"
-                f"📝 X post\n"
-                f"🔍 X community\n\n"
-                f"[View on Birdeye]({birdeye_link})\n\n"
-                f"Gamble Play, NFA, DYOR\n\n"
-                f"🔗 [Trojan]({TROJAN_REF}) | [GMGNAI]({GMGNAI_REF}) | [Axiom]({AXIOM_REF})"
-            )
-
-            if send_telegram_message(message):
-                POSTED_TOKENS[addr] = {
-                    "price": token.get("price_usd", 0),
-                    "mc": mc,
-                    "time": time.time()
-                }
-                TRACKED_TOKENS[addr] = POSTED_TOKENS[addr]
-                logger.info(f"Posted token: {symbol}")
-
+        return data
     except Exception as e:
-        logger.error(f"Error fetching tokens: {e}")
+        logger.error(f"Error fetching Helius tokens: {e}")
+        return []
 
-# === MULTIPLIER ALERTS ===
-def check_multipliers():
-    logger.info("Checking multipliers...")
-    for addr, info in TRACKED_TOKENS.items():
+# === FORMAT TELEGRAM MESSAGE ===
+def format_message(token):
+    name = token.get("name", "Unknown")
+    symbol = token.get("symbol", "???")
+    address = token.get("token_address", "N/A")
+    mc = token.get("market_cap", 0)
+    volume = token.get("volume_24h", 0)
+    liquidity = token.get("liquidity", 0)
+    age = token.get("age_minutes", 0)
+    holders = token.get("holders", "N/A")
+    dev = token.get("creator", "N/A")
+    top_holders = token.get("top10_holders_pct", "N/A")
+    bonding = token.get("bonding_curve", "N/A")
+
+    # Dexscreener link
+    dexscreener_link = f"https://dexscreener.com/solana/{address}"
+
+    # Referral links
+    trojan = "https://t.me/agamemnon_trojanbot?start=r-bigfave_001"
+    gmgnai = "https://t.me/gmgnaibot?start=i_QCOzrSSn"
+    axiom = "http://axiom.trade/@bigfave00"
+
+    msg = (
+        f"🔔 *{name}* | {symbol}\n"
+        f"`{address}`\n\n"
+        f"🧢 Marketcap: ${int(mc):,}\n"
+        f"⏱️ Age: {int(age)}m\n\n"
+        f"🧑‍💻 Dev: {dev} (💰 0%)\n"
+        f"👥 Holders: {holders}\n"
+        f"🔝 Top 10 holders: {top_holders}%\n"
+        f"🚀 Volume: ${int(volume):,}\n\n"
+        f"🏛️ Platform: Launchlab\n"
+        f"💧 Liquidity: ${int(liquidity):,}\n"
+        f"📊 Bonding Curve: {bonding}%\n\n"
+        f"📈 [View on Dexscreener]({dexscreener_link})\n\n"
+        f"🎯 [Trojan Bot]({trojan}) | [GMGNAI]({gmgnai}) | [Axiom]({axiom})\n\n"
+        f"_Gamble Play, NFA, DYOR_"
+    )
+    return msg
+
+# === TRACK 2x/3x/4x TOKENS ===
+def check_performance():
+    for addr, info in POSTED_TOKENS.items():
         try:
-            url = f"https://api.helius.xyz/v0/token/{addr}?api-key={HELIUS_API_KEY}"
+            url = f"https://api.dexscreener.com/latest/dex/pairs/solana/{addr}"
             res = requests.get(url)
-            token_data = res.json()
+            data = res.json()
+            price = data.get("pair", {}).get("priceUsd", 0)
+            if not price: continue
+            price = float(price)
+            original_price = info["price"]
 
-            current_mc = token_data.get("market_cap_usd", 0)
-            posted_mc = info["mc"]
-
-            for x in [2, 3, 4]:
-                if current_mc >= posted_mc * x and not info.get(f"{x}x_alert"):
-                    msg = (
-                        f"🚀 *{token_data['name']}* (${token_data['symbol']}) just hit *{x}x* Market Cap!\n"
-                        f"📈 From ${posted_mc:,.0f} to ${current_mc:,.0f}\n"
-                        f"https://birdeye.so/token/{addr}?chain=solana"
-                    )
-                    send_telegram_message(msg)
-                    info[f"{x}x_alert"] = True
-                    logger.info(f"{token_data['symbol']} hit {x}x!")
+            x_gain = round(price / original_price)
+            if x_gain >= 2 and x_gain <= 4 and x_gain not in info["alerts"]:
+                msg = f"🔥 ${info['symbol']} just hit *{x_gain}x* from original call!\n[View Chart](https://dexscreener.com/solana/{addr})"
+                send_telegram_message(msg)
+                info["alerts"].append(x_gain)
         except Exception as e:
-            logger.error(f"Error checking multipliers: {e}")
+            logger.error(f"Error checking performance for {addr}: {e}")
 
 # === WEEKLY SUMMARY ===
 def send_weekly_summary():
-    logger.info("Sending weekly summary...")
-    sorted_tokens = sorted(
-        POSTED_TOKENS.items(),
-        key=lambda item: item[1].get("mc", 0),
-        reverse=True
-    )[:5]
+    if not PERFORMANCE_LOG:
+        send_telegram_message("📊 No top tokens to summarize this week.")
+        return
 
-    summary = "*📊 Weekly Top 5 Tokens:*\n\n"
-    for i, (addr, data) in enumerate(sorted_tokens, 1):
-        summary += (
-            f"{i}. [{addr[:6]}...] - MC: ${data['mc']:,.0f}\n"
-        )
-    summary += "\n✅ Tracked by Zeus Gems Bot\nDYOR 🔍"
+    summary = "*📈 Weekly Zeus Gems Summary:*\n"
+    sorted_tokens = sorted(PERFORMANCE_LOG.items(), key=lambda x: x[1]["x"], reverse=True)
+    for addr, info in sorted_tokens[:5]:
+        summary += f"• {info['name']} | {info['symbol']} → {info['x']}x\n"
 
     send_telegram_message(summary)
 
-# === LOOP TASKS ===
-def start_loop():
+# === MAIN SCANNER LOOP ===
+def scanner_loop():
     while True:
-        scan_tokens()
-        check_multipliers()
+        tokens = fetch_tokens()
+        for token in tokens:
+            address = token.get("token_address")
+            volume = token.get("volume_24h", 0)
+            age = token.get("age_minutes", 999)
+            if not address or address in POSTED_TOKENS: continue
+            if MIN_VOLUME <= volume <= MAX_VOLUME and age <= 60:
+                message = format_message(token)
+                sent = send_telegram_message(message)
+                if sent:
+                    POSTED_TOKENS[address] = {
+                        "price": float(token.get("price_usd", 0.0001)),
+                        "symbol": token.get("symbol", "???"),
+                        "alerts": []
+                    }
+                    PERFORMANCE_LOG[address] = {
+                        "name": token.get("name", ""),
+                        "symbol": token.get("symbol", ""),
+                        "x": 1
+                    }
+                    logger.info(f"Posted: {token.get('symbol')}")
 
-        # Send summary every Monday at 9am
-        if datetime.utcnow().weekday() == 0 and datetime.utcnow().hour == 9:
+        check_performance()
+
+        # Weekly summary every Sunday 6pm UTC
+        now = datetime.utcnow()
+        if now.weekday() == 6 and now.hour == 18 and now.minute < 5:
             send_weekly_summary()
 
-        time.sleep(180)
+        time.sleep(120)
 
-# === FLASK FOR UPTIMEROBOT ===
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "Zeus Gems Bot is live! 🔥"
-
+# === START BOT ===
 def main():
-    threading.Thread(target=start_loop).start()
+    threading.Thread(target=scanner_loop).start()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
